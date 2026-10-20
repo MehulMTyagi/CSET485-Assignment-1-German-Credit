@@ -1,11 +1,3 @@
-# %% [markdown]
-# CSET485 Assignment 1: German Credit, roll suffix 044
-# This is an explanatory analysis, not a lending deployment model.
-# Source: https://archive.ics.uci.edu/dataset/144/statlog+german+credit+data
-# UCI's good/bad risk labels are proxies for the assignment's approve/reject,
-# not observed historical approval decisions. Positive always means approve.
-
-# %%
 from pathlib import Path
 import sys, json, hashlib, platform, urllib.request, warnings
 import numpy as np
@@ -35,16 +27,7 @@ if not (DATA / 'german.data').exists():
 data_hash = hashlib.sha256((DATA / 'german.data').read_bytes()).hexdigest()
 print('Seed:', SEED, '| SHA256:', data_hash)
 
-# %% [markdown]
-# Preprocessing: validate all 1,000 rows; retain all valid outliers; no imputation
-# is needed for this file. 'Unknown/no savings' is a documented category, not NaN.
-# Fit numeric scaling and categorical vocabulary on training rows only. Drop one
-# reference level per categorical variable; retain the same scales/references
-# when dropping a confounder. No target, row ID, or derived sex is added to X.
-# The derived sex group is only used for auditing (the original combined
-# personal-status/sex feature remains in the required full model).
 
-# %%
 columns = ['checking', 'duration', 'history', 'purpose', 'amount', 'savings',
            'employment', 'installment', 'personal_status', 'guarantor',
            'residence', 'property', 'age', 'other_plans', 'housing',
@@ -85,17 +68,8 @@ print('Train/test:', len(train), len(test), '| approvals:', ytr.sum(), yte.sum()
 print('Design columns including intercept:', Xtr.shape[1])
 print('References:', {c: levels[c][0] for c in categorical})
 
-# %% [markdown]
-# Part 1: OLS is a linear probability model; predictions may fall outside [0,1].
-# Do not clip before the required median split. The assignment's comparison
-# matrix compares model labels to each other, not either model to ground truth.
-# We also report separate ground-truth confusion matrices to avoid confusion.
-
-# %%
 ols = sm.OLS(ytr, Xtr).fit()
-# L2 regularization avoids quasi/perfect separation in rare purpose categories.
-# C=1 is fixed in advance of evaluating this final model; no test-set tuning.
-# The intercept is not penalized. The same C, rows and scaling are used in 2.2.
+
 def fit_prediction_model(x,y):
     fitted = LogisticRegression(C=1.0, solver='lbfgs', max_iter=2000, tol=1e-9).fit(x.drop(columns='const'),y)
     assert fitted.n_iter_[0] < 2000
@@ -129,19 +103,6 @@ print(agreement.to_string())
 print(json.dumps(summary, indent=2))
 print('Logit versus truth (rows actual 0,1; columns predicted 0,1):\n', confusion_matrix(yte,pred_b))
 
-# %% [markdown]
-# Part 2.1: exploratory subgroup hunt on all 1,000 rows, as requested, separately
-# from held-out prediction evaluation. Use a stable, interpretable numeric-only
-# model with all seven numeric predictors, globally standardized, in every fit.
-# This is deliberately a different explanatory specification from the full
-# prediction model. Search two declared partitions (sex; age <35 versus >=35)
-# and seven numeric predictors. Export every result; use Bonferroni over all
-# 14 between-group comparisons, rather than choosing an unadjusted p-value.
-# Since the groups are disjoint, SE(beta_A-beta_B)=sqrt(SE_A^2+SE_B^2).
-# These are conditional associations, not causal effects. A sign change alone
-# with wide intervals is not established Simpson's paradox.
-
-# %%
 all_z = sm.add_constant(((df[numeric]-mean)/scale).astype(float), has_constant='add')
 pooled = sm.GLM(df.approve, all_z, family=sm.families.Binomial()).fit(cov_type='HC0')
 partitions = {'sex': df.sex == 'Female', 'age35': df.age < 35}
@@ -173,15 +134,6 @@ selected = hunt.iloc[0].to_dict()
 print(hunt.to_string(index=False, float_format=lambda x:f'{x:.5f}'))
 print('Selected strongest evidence (exploratory):', json.dumps(selected, indent=2))
 
-# %% [markdown]
-# Part 2.2: omit duration, a plausible shared driver of credit amount and risk.
-# The same training rows and original coding/scales are retained. Full means
-# all 20 usable predictors, not the outcome/derived fields. Changes in logistic
-# coefficients can also reflect non-collapsibility; they do not prove causal
-# confounding. Percentage change uses 100*(reduced-full)/abs(full), with the
-# denominator stated explicitly; near-zero coefficients make percentages unstable.
-
-# %%
 reduced = fit_prediction_model(Xtr.drop(columns='duration'),ytr)
 ovb = pd.DataFrame({'full': logit.params, 'without_duration': reduced.params}).drop(index=['const','duration'])
 ovb['change'] = ovb.without_duration-ovb.full
@@ -195,13 +147,7 @@ print('Largest relative shift among four:', ovb_four.absolute_percent_change.idx
 print('Largest relative shift among all retained predictors:', ovb.absolute_percent_change.idxmax())
 print('Largest absolute coefficient shift among all:', ovb.change.abs().idxmax())
 
-# %% [markdown]
-# Part 2.3: identify confident mistakes using held-out outcomes only, then sample
-# with seed 44 if more than 50 exist. This is a retrospective error audit, not a
-# representative evaluation subset and not a new training set. Describing an
-# enriched trait is evidence of a failure pattern, not proof of its mechanism.
 
-# %%
 wrong_mask = ((prob>=.75)&(yte==0)) | ((prob<=.25)&(yte==1))
 wrong = comparison.loc[wrong_mask].copy()
 adversarial = wrong.sample(n=min(50,len(wrong)), random_state=SEED)
@@ -241,15 +187,6 @@ contributions.to_csv(RESULTS / 'confident_error_logit_contributions.csv', header
 print('Example source row:', example.name, '| p:',example.logit_probability,'| actual:', example.approve)
 print('Largest positive contributions:',contributions.tail(6).to_string())
 
-# %% [markdown]
-# Part 2.4: Group A=Female, Group B=Male from the documented combined sex/status
-# field. It is a limited historical binary coding, not a complete gender measure.
-# Compute the assignment's exact directional ratios; do not silently symmetrize.
-# EO=min(TPR_A/TPR_B,FPR_A/FPR_B) is an assignment-specific summary and EO=1 alone
-# does NOT establish equalized odds. Export both component ratios and raw rates.
-# Undefined denominators yield NaN (NA in CSV); never replace 0/0 with 0 or 1.
-
-# %%
 def divide(a,b):
     return float(a/b) if np.isfinite(a) and np.isfinite(b) and b!=0 else np.nan
 def group_rates(actual, decision):
@@ -300,16 +237,6 @@ ax.axhline(1,color='gray',linestyle='--',linewidth=.8)
 ax.set(xlabel='Approval threshold',ylabel='Female / Male ratio',title='All thresholds; missing values are undefined')
 ax.legend(); ax.grid(alpha=.15); fig.tight_layout(); fig.savefig(RESULTS/'fairness_by_threshold.png',dpi=180); plt.close(fig)
 
-# %% [markdown]
-# Quantify an observed trade-off without assuming that a larger ratio is always
-# fairer: define parity proximity = min(r,1/r) for r>0 (1=parity). Find all pairs
-# where DP proximity improves and EO proximity worsens; export them all. Also
-# print the raw-ratio changes for a pair entirely below 1, if one exists, which
-# matches the assignment's percentage-gain wording directly.
-# Threshold selection on this test set is exploratory, not an unbiased estimate
-# of a tuned policy. A future deployment needs separate validation and testing.
-
-# %%
 def proximity(r):
     return min(r,1/r) if np.isfinite(r) and r>0 else np.nan
 tradeoffs=[]
@@ -324,7 +251,6 @@ for _,a in fairness.iterrows():
 trades=pd.DataFrame(tradeoffs)
 trades.to_csv(RESULTS/'tradeoff_pairs.csv',index=False)
 print('Trade-off pairs:\n',trades.to_string(index=False))
-# Two real, anonymous records whose approvals change from t=.65 to t=.75.
 scenario = comparison[(prob>=.65)&(prob<.75)].groupby('sex',sort=True).head(1).copy()
 scenario['decision_at_0.65'] = (scenario.logit_probability>=.65).astype(int)
 scenario['decision_at_0.75'] = (scenario.logit_probability>=.75).astype(int)
@@ -341,16 +267,3 @@ summary['versions']={'python':platform.python_version(),'numpy':np.__version__,'
 pd.DataFrame({'train_index':pd.Series(train_idx),'test_index':pd.Series(test_idx)}).to_csv(RESULTS/'split_indices.csv',index=False)
 print('Saved all results to:',RESULTS)
 print('Versions:',summary['versions'])
-
-# %% [markdown]
-# Interpretation checklist for the written responses:
-# 1. Distinguish model agreement from ground-truth accuracy.
-# 2. Quote subgroup coefficients, intervals, adjusted p-value, and model scope.
-# 3. Quote four before/after coefficients; do not infer causality from shifts.
-# 4. Propose a prospective audit including applicants the bank previously rejected.
-# 5. Separate observed error patterns from untested explanations of their cause.
-# 6. Use actual test rows when giving the two-person threshold scenario.
-# 7. Name a defensible threshold with at least three metrics and a counterargument.
-# 8. State whose harms matter when favoring one fairness criterion.
-# Reflection: use the evidence to justify a deployment decision and its limits.
-# Do not claim that every dataset must show a paradox or a fairness conflict.
